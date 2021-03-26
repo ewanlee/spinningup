@@ -14,13 +14,14 @@ class ReplayBuffer:
     A simple FIFO experience replay buffer for SAC agents.
     """
 
-    def __init__(self, obs_dim, act_dim, size):
+    def __init__(self, obs_dim, act_dim, size, augment_fn):
         self.obs_buf = np.zeros(core.combined_shape(size, obs_dim), dtype=np.float32)
         self.obs2_buf = np.zeros(core.combined_shape(size, obs_dim), dtype=np.float32)
         self.act_buf = np.zeros(core.combined_shape(size, act_dim), dtype=np.float32)
         self.rew_buf = np.zeros(size, dtype=np.float32)
         self.done_buf = np.zeros(size, dtype=np.float32)
         self.ptr, self.size, self.max_size = 0, 0, size
+        self.augment_fn = augment_fn
 
     def store(self, obs, act, rew, next_obs, done):
         self.obs_buf[self.ptr] = obs
@@ -33,8 +34,25 @@ class ReplayBuffer:
 
     def sample_batch(self, batch_size=32):
         idxs = np.random.randint(0, self.size, size=batch_size)
-        batch = dict(obs=self.obs_buf[idxs],
-                     obs2=self.obs2_buf[idxs],
+        obses = self.obs_buf[idxs]
+        next_obses = self.obs2_buf[idxs]
+        if self.augment_fn != 'none':
+            if self.augment_fn == 'ras-s':
+                scale_factors = np.random.uniform(0.8, 1.2, batch_size)[:, np.newaxis]
+                obses = obses * scale_factors
+                next_obses = next_obses * scale_factors
+            elif self.augment_fn == 'ras-m':
+                scale_factors = np.random.uniform(0.8, 1.2, obses.shape)
+                obses = obses * scale_factors
+                next_obses = next_obses * scale_factors
+            else:
+                means = np.zeros(obses.shape[1], )
+                covs = np.identity(obses.shape[1], )
+                scale_factors = np.multivariate_normal(means, covs, batch_size)
+                obses = obses * scale_factors
+                next_obses = next_obses * scale_factors
+        batch = dict(obs=obses,
+                     obs2=next_obses,
                      act=self.act_buf[idxs],
                      rew=self.rew_buf[idxs],
                      done=self.done_buf[idxs])
@@ -43,7 +61,7 @@ class ReplayBuffer:
 
 
 def sac(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0, 
-        steps_per_epoch=4000, epochs=100, replay_size=int(1e6), gamma=0.99, 
+        steps_per_epoch=4000, epochs=100, rad='none', replay_size=int(1e6), gamma=0.99, 
         polyak=0.995, lr=1e-3, alpha=0.2, batch_size=100, start_steps=10000, 
         update_after=1000, update_every=50, num_test_episodes=10, max_ep_len=1000, 
         logger_kwargs=dict(), save_freq=1):
@@ -98,6 +116,8 @@ def sac(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
             for the agent and the environment in each epoch.
 
         epochs (int): Number of epochs to run and train agent.
+
+        rad (str): Type of RAD algorithm.
 
         replay_size (int): Maximum length of replay buffer.
 
@@ -169,7 +189,7 @@ def sac(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
     q_params = itertools.chain(ac.q1.parameters(), ac.q2.parameters())
 
     # Experience buffer
-    replay_buffer = ReplayBuffer(obs_dim=obs_dim, act_dim=act_dim, size=replay_size)
+    replay_buffer = ReplayBuffer(obs_dim=obs_dim, act_dim=act_dim, size=replay_size, augment_fn=rad)
 
     # Count variables (protip: try to get a feel for how different size networks behave!)
     var_counts = tuple(core.count_vars(module) for module in [ac.pi, ac.q1, ac.q2])
@@ -356,6 +376,7 @@ if __name__ == '__main__':
     parser.add_argument('--gamma', type=float, default=0.99)
     parser.add_argument('--seed', '-s', type=int, default=0)
     parser.add_argument('--epochs', type=int, default=50)
+    parser.add_argument('--rad', type=str, default='none', choices=['none', 'ras-s', 'ras-m', 'gn'])
     parser.add_argument('--exp_name', type=str, default='sac')
     args = parser.parse_args()
 
@@ -366,5 +387,5 @@ if __name__ == '__main__':
 
     sac(lambda : gym.make(args.env), actor_critic=core.MLPActorCritic,
         ac_kwargs=dict(hidden_sizes=[args.hid]*args.l), 
-        gamma=args.gamma, seed=args.seed, epochs=args.epochs,
+        gamma=args.gamma, seed=args.seed, epochs=args.epochs, rad=args.rad,
         logger_kwargs=logger_kwargs)
